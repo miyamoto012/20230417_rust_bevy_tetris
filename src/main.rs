@@ -14,6 +14,9 @@ fn main() {
     App::new()
         .init_resource::<Materials>()
         .init_resource::<BlockPatterns>()
+        .init_resource::<BlockFallTimer>()
+        .init_resource::<GameBoard>()
+        .add_event::<NewBlockEvent>()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Tetris!".into(),
@@ -22,12 +25,17 @@ fn main() {
             }),
             ..default()
         }))
-        .add_system(bevy::window::close_on_esc)
+        .add_startup_system(send_new_block_event)
         .add_startup_system(spawn_camera)
-        .add_startup_system(spawn_block_element)
-        // .add_system(position_transform)
+
+        .add_system(bevy::window::close_on_esc)
+
+        .add_system(tick_block_fall_timer)
+        .add_system(spawn_block_element)
         .add_system(position_translation)
+
         .add_system(size_scaling)
+        .add_system(block_fall)
         .run();
 }
 
@@ -42,7 +50,7 @@ pub struct Materials {
     colors: Vec<Color>
 }
 
-struct NewBlockEvent;
+pub struct NewBlockEvent;
 
 impl Default for Materials {
     fn default() -> Materials {
@@ -76,15 +84,66 @@ impl Default for BlockPatterns {
     }
 }
 
+pub const BLOCK_FALL_TIMER: f32 = 0.4;
+
+#[derive(Resource)]
+pub struct BlockFallTimer{
+    pub timer: Timer,
+}
+
+impl Default for BlockFallTimer {
+    fn default() -> Self {
+        BlockFallTimer{
+            timer: Timer::from_seconds(BLOCK_FALL_TIMER, TimerMode::Repeating),
+        }
+    }
+}
+
+#[derive(Component)]
+pub struct FreeBlock{}
+
+#[derive(Component)]
+pub struct FixBlock{}
+
+#[derive(Resource)]
+pub struct GameBoard(Vec<Vec<bool>>);
+
+impl Default for GameBoard {
+    fn default() -> Self {
+        GameBoard(vec![vec![false; 25]; 25])
+    }
+}
+
+
+
+
+pub fn tick_block_fall_timer (
+    mut block_fall_timer: ResMut<BlockFallTimer>,
+    time: Res<Time>,
+){
+    block_fall_timer.timer.tick(time.delta());
+}
+
 pub fn spawn_camera(mut commands: Commands){
     commands.spawn(Camera2dBundle::default());
+}
+
+pub fn send_new_block_event(
+    mut new_block_event_reader: EventWriter<NewBlockEvent>
+){
+    new_block_event_reader.send(NewBlockEvent);
 }
 
 pub fn spawn_block_element(
     mut commands: Commands,
     materials: Res<Materials>,
     block_patterns: Res<BlockPatterns>,
+    mut new_block_event_reader: EventReader<NewBlockEvent>,
 ){
+    if new_block_event_reader.iter().count() == 0 {
+        return;
+    }
+
     let new_block = next_block(&block_patterns.0);
     let new_color = next_color(&materials.colors);
 
@@ -109,7 +168,8 @@ pub fn spawn_block_element(
             Position {
                 x: (initial_x as i32 + r_x),
                 y: (initial_y as i32 + r_y),
-            }
+            },
+            FreeBlock{}
            ));
     }
 }
@@ -130,21 +190,39 @@ fn next_block(blocks: &Vec<Vec<(i32, i32)>>) -> Vec<(i32, i32)> {
     blocks[block_index].clone()
 }
 
-pub fn position_transform(
-    mut position_query: Query<(&Position, &mut Transform)>
-) {
-    let origin_x = UNIT_WIDTH as i32 / 2 - SCREEN_WIDTH as i32 / 2;
-    let origin_y = UNIT_HEIGHT as i32 / 2 - SCREEN_HEIGHT as i32 / 2;
-    position_query
-        .iter_mut()
-        .for_each(|(pos, mut transform)| {
-            transform.translation = Vec3::new(
-                (origin_x + pos.x as i32 * UNIT_WIDTH as i32) as f32,
-                (origin_y + pos.y as i32 * UNIT_HEIGHT as i32) as f32,
-                0.0,
-            );
-            transform.scale = Vec3::new(UNIT_WIDTH as f32, UNIT_HEIGHT as f32, 0.0);
-        });
+pub fn block_fall(
+    mut commands: Commands,
+    mut block_query: Query<(Entity, &mut Position), With<FreeBlock>>,
+    block_fall_timer: Res<BlockFallTimer>,
+    mut game_board: ResMut<GameBoard>,
+    mut new_block_events: EventWriter<NewBlockEvent>,
+){
+    if ! block_fall_timer.timer.finished() {
+        return;
+    }
+
+    let cannot_fall = block_query.iter().any(|(_, position)| {
+        if position.x as u32 >= X_LENGTH || position.y as u32 >= Y_LENGTH {
+            return false;
+        }
+
+        position.y == 0 || game_board.0[(position.y - 1) as usize][position.x as usize]
+    });
+
+    if cannot_fall {
+        for (entity, position) in block_query.iter() {
+            commands.entity(entity)
+                .remove::<FreeBlock>()
+                .insert(FixBlock{});
+
+            game_board.0[position.y as usize][position.x as usize] = true;
+        }
+        new_block_events.send(NewBlockEvent);
+    } else {
+        for(_ , mut block_position) in block_query.iter_mut() {
+            block_position.y -= 1;
+        }
+    }
 }
 
 pub fn size_scaling (
@@ -168,5 +246,4 @@ pub fn position_translation(
             0.0,
         );
     }
-
 }
